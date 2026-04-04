@@ -1,20 +1,5 @@
---!strict
---[[
-	uwuware reborn v2
-	full standalone rewrite
-	- keeps the public API familiar
-	- better cleanup / lifecycle
-	- proper accent propagation
-	- cleaner bind handling
-	- fixed slider fill math for negative ranges
-	- searchable windows/folders/options
-	- draggable + resizable windows
-	- smoother open / close flow
-]]
-
----------------------------------------------------------------------
--- Library root
----------------------------------------------------------------------
+-- uwuware reborn v2 - compatibility build
+-- plain Luau / executor-friendly rewrite
 
 local library = {
 	flags = {},
@@ -25,20 +10,13 @@ local library = {
 	_rootMaid = nil,
 }
 
----------------------------------------------------------------------
--- Services
----------------------------------------------------------------------
-
 local RunService = game:GetService("RunService")
 local TweenService = game:GetService("TweenService")
 local TextService = game:GetService("TextService")
 local InputService = game:GetService("UserInputService")
-local Players = game:GetService("Players")
 local CoreGui = game:GetService("CoreGui")
 
----------------------------------------------------------------------
--- Constants
----------------------------------------------------------------------
+local unpackFn = table.unpack or unpack
 
 local TWEEN_FAST = TweenInfo.new(0.12, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
 local TWEEN_MED = TweenInfo.new(0.20, Enum.EasingStyle.Quad, Enum.EasingDirection.Out)
@@ -53,8 +31,8 @@ local MAX_WINDOW_WIDTH = 420
 local HEADER_HEIGHT = 40
 local SUB_HEADER_HEIGHT = 34
 local OPTION_PAD_X = 8
-local SLIDE_LEFT_PAD = 20
 local WINDOW_GAP = 260
+local WINDOW_X = 20
 local WINDOW_Y = 82
 
 local ROUND_IMAGE = "rbxassetid://3570695787"
@@ -87,20 +65,11 @@ local MOUSE_ALIASES = {
 	MouseButton3 = "Mouse3",
 }
 
----------------------------------------------------------------------
--- State
----------------------------------------------------------------------
-
 local accentBindings = {}
 local windowOriginals = {}
-
 local searchBar = nil
 local searchInput = nil
 local currentSearch = ""
-
----------------------------------------------------------------------
--- Maid
----------------------------------------------------------------------
 
 local function newMaid()
 	local self = {
@@ -118,14 +87,13 @@ local function newMaid()
 			local kind = typeof(task)
 
 			if kind == "RBXScriptConnection" then
-				(task :: RBXScriptConnection):Disconnect()
+				task:Disconnect()
 			elseif kind == "Instance" then
-				local inst = task :: Instance
-				if inst.Parent ~= nil then
-					inst:Destroy()
+				if task.Parent ~= nil then
+					task:Destroy()
 				end
 			elseif kind == "function" then
-				(task :: any)()
+				task()
 			end
 
 			self._tasks[i] = nil
@@ -135,23 +103,23 @@ local function newMaid()
 	return self
 end
 
----------------------------------------------------------------------
--- Utilities
----------------------------------------------------------------------
-
 local function create(className, props)
 	local instance = Instance.new(className)
+
 	if props then
 		for k, v in pairs(props) do
-			(instance :: any)[k] = v
+			instance[k] = v
 		end
 	end
+
 	return instance
 end
 
 local function rounded(className, props)
 	props = props or {}
-	props.BackgroundTransparency = if props.BackgroundTransparency == nil then 1 else props.BackgroundTransparency
+	if props.BackgroundTransparency == nil then
+		props.BackgroundTransparency = 1
+	end
 	props.Image = props.Image or ROUND_IMAGE
 	props.ScaleType = props.ScaleType or Enum.ScaleType.Slice
 	props.SliceCenter = props.SliceCenter or Rect.new(100, 100, 100, 100)
@@ -165,14 +133,8 @@ local function tween(obj, info, goals)
 	return t
 end
 
-local function tweenWait(obj, info, goals)
-	local t = tween(obj, info, goals)
-	t.Completed:Wait()
-	return t
-end
-
 local function measureText(text, size, font)
-	return TextService:GetTextSize(text, size, font, Vector2.new(1e6, 1e6))
+	return TextService:GetTextSize(text, size, font, Vector2.new(10000, 10000))
 end
 
 local function contains(list, value)
@@ -202,18 +164,20 @@ local function safeCall(name, callback, ...)
 	local packed = table.pack(...)
 	task.spawn(function()
 		local ok, err = pcall(function()
-			callback(table.unpack(packed, 1, packed.n))
+			callback(unpackFn(packed, 1, packed.n))
 		end)
 
 		if not ok then
-			warn(("[uwuware] %s callback error: %s"):format(name, tostring(err)))
+			warn(("[uwuware] %s callback error: %s"):format(tostring(name), tostring(err)))
 		end
 	end)
 end
 
 local function getGuiParent()
 	local ok, hui = pcall(function()
-		return (gethui :: any)()
+		if gethui then
+			return gethui()
+		end
 	end)
 
 	if ok and hui then
@@ -244,7 +208,11 @@ local function bindAccentProperty(instance, property, transform)
 
 	table.insert(accentBindings, entry)
 
-	(instance :: any)[property] = if transform then transform(library.accent) else library.accent
+	if transform then
+		instance[property] = transform(library.accent)
+	else
+		instance[property] = library.accent
+	end
 
 	return function()
 		entry.dead = true
@@ -259,7 +227,6 @@ local function bindAccentCallback(callback)
 	}
 
 	table.insert(accentBindings, entry)
-
 	callback(library.accent)
 
 	return function()
@@ -273,21 +240,8 @@ local function warnDuplicateFlag(flag)
 	end
 end
 
-local function normalizeOption(holder, option, kind)
-	option = option or {}
-	option.type = kind
-	option.position = #holder.options + 1
-	option.text = tostring(option.text or kind)
-	option.flag = tostring(option.flag or sanitizeFlag(option.text))
-	option.callback = option.callback or function() end
-	option._maid = option._maid or newMaid()
-	option._parentHolder = holder
-	return option
-end
-
-local function formatBindKey(key)
-	key = tostring(key)
-	return MOUSE_ALIASES[key] or key
+local function inputMatches(input, key)
+	return input.KeyCode.Name == key or input.UserInputType.Name == key
 end
 
 local function getBindableInput(input)
@@ -302,8 +256,9 @@ local function getBindableInput(input)
 	return nil
 end
 
-local function inputMatches(input, key)
-	return input.KeyCode.Name == key or input.UserInputType.Name == key
+local function formatBindKey(key)
+	key = tostring(key)
+	return MOUSE_ALIASES[key] or key
 end
 
 local function sliderAlpha(min, max, value)
@@ -333,10 +288,8 @@ local function colorToHex(color)
 	return string.format("#%02X%02X%02X", r, g, b)
 end
 
----------------------------------------------------------------------
--- Forward declarations
----------------------------------------------------------------------
-
+local createHolderRecord
+local attachHolderMethods
 local createLabel
 local createToggle
 local createButton
@@ -345,13 +298,8 @@ local createSlider
 local createList
 local createBox
 local createColor
-local attachHolderMethods
-local destroyHolderRecursive
 local applySearchToHolder
-
----------------------------------------------------------------------
--- Holder sizing / search helpers
----------------------------------------------------------------------
+local destroyHolderRecursive
 
 local function refreshHolderChain(holder, instant)
 	if holder and holder._RefreshHeight then
@@ -365,11 +313,19 @@ local function setHolderOpen(holder, state, instant)
 	end
 end
 
----------------------------------------------------------------------
--- Holder creation
----------------------------------------------------------------------
+local function normalizeOption(holder, option, kind)
+	option = option or {}
+	option.type = kind
+	option.position = #holder.options + 1
+	option.text = tostring(option.text or kind)
+	option.flag = tostring(option.flag or sanitizeFlag(option.text))
+	option.callback = option.callback or function() end
+	option._maid = option._maid or newMaid()
+	option._parentHolder = holder
+	return option
+end
 
-local function createHolderRecord(title, position, isFolder)
+createHolderRecord = function(title, position, isFolder)
 	local holder = {
 		title = tostring(title),
 		options = {},
@@ -380,7 +336,7 @@ local function createHolderRecord(title, position, isFolder)
 		main = nil,
 		content = nil,
 		layout = nil,
-		_headerHeight = if isFolder then SUB_HEADER_HEIGHT else HEADER_HEIGHT,
+		_headerHeight = isFolder and SUB_HEADER_HEIGHT or HEADER_HEIGHT,
 		_isHolder = true,
 		_isFolder = isFolder == true,
 		_parentHolder = nil,
@@ -406,15 +362,21 @@ local function createHolderRecord(title, position, isFolder)
 			return
 		end
 
-		local widthScale = if self._isFolder then 1 else 0
-		local widthOffset = if self._isFolder then 0 else self.main.Size.X.Offset
 		local contentHeight = self.layout.AbsoluteContentSize.Y
-
 		self.content.Size = UDim2.new(1, 0, 0, contentHeight)
 		self.content.Visible = self.open
 
-		local targetHeight = self._headerHeight + (if self.open then contentHeight else 0)
-		local targetSize = UDim2.new(widthScale, widthOffset, 0, targetHeight)
+		local targetHeight = self._headerHeight
+		if self.open then
+			targetHeight = targetHeight + contentHeight
+		end
+
+		local targetSize
+		if self._isFolder then
+			targetSize = UDim2.new(1, 0, 0, targetHeight)
+		else
+			targetSize = UDim2.new(0, self.main.Size.X.Offset, 0, targetHeight)
+		end
 
 		if instant then
 			self.main.Size = targetSize
@@ -431,23 +393,35 @@ local function createHolderRecord(title, position, isFolder)
 		self.open = state
 
 		if self._arrow then
+			local arrowRotation = 180
+			local arrowColor = Color3.fromRGB(36, 36, 36)
+
+			if state then
+				arrowRotation = 90
+				arrowColor = Color3.fromRGB(56, 56, 56)
+			end
+
 			if instant then
-				self._arrow.Rotation = if state then 90 else 180
-				self._arrow.ImageColor3 = if state then Color3.fromRGB(56, 56, 56) else Color3.fromRGB(36, 36, 36)
+				self._arrow.Rotation = arrowRotation
+				self._arrow.ImageColor3 = arrowColor
 			else
 				tween(self._arrow, TWEEN_MED, {
-					Rotation = if state then 90 else 180,
-					ImageColor3 = if state then Color3.fromRGB(56, 56, 56) else Color3.fromRGB(36, 36, 36),
+					Rotation = arrowRotation,
+					ImageColor3 = arrowColor,
 				})
 			end
 		end
 
 		if self._headerBg then
-			local color = if state then Color3.fromRGB(12, 12, 12) else Color3.fromRGB(8, 8, 8)
+			local bgColor = Color3.fromRGB(8, 8, 8)
+			if state then
+				bgColor = Color3.fromRGB(12, 12, 12)
+			end
+
 			if instant then
-				self._headerBg.ImageColor3 = color
+				self._headerBg.ImageColor3 = bgColor
 			else
-				tween(self._headerBg, TWEEN_MED, { ImageColor3 = color })
+				tween(self._headerBg, TWEEN_MED, { ImageColor3 = bgColor })
 			end
 		end
 
@@ -477,7 +451,7 @@ local function createHolderRecord(title, position, isFolder)
 				Parent = parent,
 			})
 		else
-			local targetPos = UDim2.new(0, SLIDE_LEFT_PAD + ((self.position - 1) * WINDOW_GAP), 0, WINDOW_Y)
+			local targetPos = UDim2.new(0, WINDOW_X + ((self.position - 1) * WINDOW_GAP), 0, WINDOW_Y)
 			self._targetPosition = targetPos
 
 			main = rounded("ImageButton", {
@@ -501,7 +475,7 @@ local function createHolderRecord(title, position, isFolder)
 
 		local headerBg = rounded("ImageLabel", {
 			Size = UDim2.new(1, 0, 0, self._headerHeight),
-			ImageColor3 = if self.open then Color3.fromRGB(12, 12, 12) else Color3.fromRGB(8, 8, 8),
+			ImageColor3 = self.open and Color3.fromRGB(12, 12, 12) or Color3.fromRGB(8, 8, 8),
 			Parent = main,
 		})
 		self._headerBg = headerBg
@@ -511,8 +485,8 @@ local function createHolderRecord(title, position, isFolder)
 			Position = UDim2.new(0, 10, 0, 0),
 			Size = UDim2.new(1, -44, 1, 0),
 			Text = self.title,
-			Font = if self._isFolder then Enum.Font.GothamSemibold else Enum.Font.GothamBold,
-			TextSize = if self._isFolder then 15 else 16,
+			Font = self._isFolder and Enum.Font.GothamSemibold or Enum.Font.GothamBold,
+			TextSize = self._isFolder and 15 or 16,
 			TextColor3 = Color3.fromRGB(255, 255, 255),
 			TextXAlignment = Enum.TextXAlignment.Left,
 			Parent = main,
@@ -544,8 +518,8 @@ local function createHolderRecord(title, position, isFolder)
 			Size = UDim2.new(0, 14, 0, 14),
 			BackgroundTransparency = 1,
 			Image = ARROW_IMAGE,
-			ImageColor3 = if self.open then Color3.fromRGB(56, 56, 56) else Color3.fromRGB(36, 36, 36),
-			Rotation = if self.open then 90 else 180,
+			ImageColor3 = self.open and Color3.fromRGB(56, 56, 56) or Color3.fromRGB(36, 36, 36),
+			Rotation = self.open and 90 or 180,
 			Parent = arrowButton,
 		})
 		self._arrow = arrow
@@ -579,12 +553,12 @@ local function createHolderRecord(title, position, isFolder)
 		end))
 
 		self._maid:GiveTask(arrowButton.MouseButton1Click:Connect(function()
-			self:_SetOpen(not self.open)
+			self:_SetOpen(not self.open, false)
 		end))
 
 		if self._isFolder then
 			self._maid:GiveTask(dragButton.MouseButton1Click:Connect(function()
-				self:_SetOpen(not self.open)
+				self:_SetOpen(not self.open, false)
 			end))
 		else
 			local dragging = false
@@ -603,13 +577,12 @@ local function createHolderRecord(title, position, isFolder)
 				if dragging and input.UserInputType == Enum.UserInputType.MouseMovement and dragStart and startPos then
 					local delta = input.Position - dragStart
 					local y = math.max(startPos.Y.Offset + delta.Y, -36)
-					local target = UDim2.new(
+					self.main.Position = UDim2.new(
 						startPos.X.Scale,
 						startPos.X.Offset + delta.X,
 						startPos.Y.Scale,
 						y
 					)
-					self.main.Position = target
 				end
 			end))
 
@@ -624,7 +597,7 @@ local function createHolderRecord(title, position, isFolder)
 				Position = UDim2.new(1, 0, 1, 0),
 				Size = UDim2.new(0, 14, 0, 14),
 				BackgroundTransparency = 1,
-				ZIndex = 4,
+				ZIndex = 5,
 				Parent = main,
 			})
 			self._resizeHandle = handle
@@ -684,13 +657,8 @@ local function createHolderRecord(title, position, isFolder)
 	end
 
 	attachHolderMethods(holder)
-
 	return holder
 end
-
----------------------------------------------------------------------
--- Holder methods
----------------------------------------------------------------------
 
 local function addOptionObject(holder, option, creator)
 	option._creator = creator
@@ -710,13 +678,11 @@ end
 
 attachHolderMethods = function(holder)
 	function holder:AddLabel(option)
-		option = option or {}
 		option = normalizeOption(self, option, "label")
 		return addOptionObject(self, option, createLabel)
 	end
 
 	function holder:AddToggle(option)
-		option = option or {}
 		option = normalizeOption(self, option, "toggle")
 		option.state = option.state == true
 		warnDuplicateFlag(option.flag)
@@ -724,13 +690,11 @@ attachHolderMethods = function(holder)
 	end
 
 	function holder:AddButton(option)
-		option = option or {}
 		option = normalizeOption(self, option, "button")
 		return addOptionObject(self, option, createButton)
 	end
 
 	function holder:AddBind(option)
-		option = option or {}
 		option = normalizeOption(self, option, "bind")
 		option.key = tostring(option.key or "RightShift")
 		option.hold = option.hold == true
@@ -739,20 +703,19 @@ attachHolderMethods = function(holder)
 	end
 
 	function holder:AddSlider(option)
-		option = option or {}
 		option = normalizeOption(self, option, "slider")
 		option.min = tonumber(option.min or 0) or 0
 		option.max = tonumber(option.max or 100) or 100
 		option.float = tonumber(option.float or 1) or 1
-		option.dual = option.dual == true
-		option.value = tonumber(option.value or option.min) or option.min
-		option.value2 = tonumber(option.value2 or option.max) or option.max
+		option.value = tonumber(option.value)
+		if option.value == nil then
+			option.value = option.min
+		end
 		warnDuplicateFlag(option.flag)
 		return addOptionObject(self, option, createSlider)
 	end
 
 	function holder:AddList(option)
-		option = option or {}
 		option = normalizeOption(self, option, "list")
 		option.values = option.values or {}
 		option.value = tostring(option.value or option.values[1] or "")
@@ -762,7 +725,6 @@ attachHolderMethods = function(holder)
 	end
 
 	function holder:AddBox(option)
-		option = option or {}
 		option = normalizeOption(self, option, "box")
 		option.value = tostring(option.value or "")
 		warnDuplicateFlag(option.flag)
@@ -770,7 +732,6 @@ attachHolderMethods = function(holder)
 	end
 
 	function holder:AddColor(option)
-		option = option or {}
 		option = normalizeOption(self, option, "color")
 		option.color = option.color or library.accent
 		option.open = option.open == true
@@ -795,10 +756,6 @@ attachHolderMethods = function(holder)
 		return folder
 	end
 end
-
----------------------------------------------------------------------
--- Option creators
----------------------------------------------------------------------
 
 createLabel = function(option, parent)
 	local main = create("TextLabel", {
@@ -831,7 +788,7 @@ createToggle = function(option, parent)
 		Parent = parent.content,
 	})
 
-	local label = create("TextLabel", {
+	create("TextLabel", {
 		BackgroundTransparency = 1,
 		Position = UDim2.new(0, 0, 0, 0),
 		Size = UDim2.new(1, -26, 1, 0),
@@ -848,7 +805,7 @@ createToggle = function(option, parent)
 		Position = UDim2.new(1, -3, 0.5, 0),
 		Size = UDim2.new(0, 18, 0, 18),
 		SliceScale = 0.02,
-		ImageColor3 = if option.state then library.accent else Color3.fromRGB(90, 90, 90),
+		ImageColor3 = option.state and library.accent or Color3.fromRGB(90, 90, 90),
 		Parent = main,
 	})
 
@@ -856,7 +813,7 @@ createToggle = function(option, parent)
 		Position = UDim2.new(0, 2, 0, 2),
 		Size = UDim2.new(1, -4, 1, -4),
 		SliceScale = 0.02,
-		ImageColor3 = if option.state then library.accent else Color3.fromRGB(20, 20, 20),
+		ImageColor3 = option.state and library.accent or Color3.fromRGB(20, 20, 20),
 		Parent = outline,
 	})
 
@@ -866,7 +823,7 @@ createToggle = function(option, parent)
 		Size = UDim2.new(0, 9, 0, 9),
 		BackgroundTransparency = 1,
 		Image = CHECK_IMAGE,
-		ImageTransparency = if option.state then 0 else 1,
+		ImageTransparency = option.state and 0 or 1,
 		ImageColor3 = Color3.fromRGB(255, 255, 255),
 		Parent = inner,
 	})
@@ -874,14 +831,12 @@ createToggle = function(option, parent)
 	option.main = main
 	library.flags[option.flag] = option.state
 
-	local function refreshAccent(accent)
-		if option.state then
+	option._maid:GiveTask(bindAccentCallback(function(accent)
+		if option.state and outline.Parent then
 			outline.ImageColor3 = accent
 			inner.ImageColor3 = accent
 		end
-	end
-
-	option._maid:GiveTask(bindAccentCallback(refreshAccent))
+	end))
 
 	function option:SetState(state, silent)
 		state = state == true
@@ -889,15 +844,15 @@ createToggle = function(option, parent)
 		library.flags[self.flag] = state
 
 		tween(outline, TWEEN_FAST, {
-			ImageColor3 = if state then library.accent else Color3.fromRGB(90, 90, 90),
+			ImageColor3 = state and library.accent or Color3.fromRGB(90, 90, 90),
 		})
 
 		tween(inner, TWEEN_FAST, {
-			ImageColor3 = if state then library.accent else Color3.fromRGB(20, 20, 20),
+			ImageColor3 = state and library.accent or Color3.fromRGB(20, 20, 20),
 		})
 
 		tween(check, TWEEN_FAST, {
-			ImageTransparency = if state then 0 else 1,
+			ImageTransparency = state and 0 or 1,
 		})
 
 		if not silent then
@@ -925,10 +880,10 @@ createButton = function(option, parent)
 		Parent = parent.content,
 	})
 
-	local label = create("TextLabel", {
+	create("TextLabel", {
 		BackgroundTransparency = 1,
 		Position = UDim2.new(0, 8, 0, 0),
-		Size = UDim2.new(1, -20, 1, 0),
+		Size = UDim2.new(1, -16, 1, 0),
 		Text = option.text,
 		Font = Enum.Font.Gotham,
 		TextSize = 14,
@@ -951,23 +906,20 @@ createButton = function(option, parent)
 
 	option._maid:GiveTask(main.MouseButton1Click:Connect(function()
 		tween(main, TWEEN_FAST, { ImageColor3 = Color3.fromRGB(24, 24, 24) })
+
 		task.delay(0.08, function()
 			if main.Parent then
 				tween(main, TWEEN_FAST, { ImageColor3 = Color3.fromRGB(18, 18, 18) })
 			end
 		end)
 
+		flash.BackgroundTransparency = 0
 		flash.Size = UDim2.new(0, 0, 0, 2)
 		tween(flash, TWEEN_FAST, { Size = UDim2.new(1, 0, 0, 2) })
-		task.delay(0.12, function()
+
+		task.delay(0.14, function()
 			if flash.Parent then
 				tween(flash, TWEEN_FAST, { BackgroundTransparency = 1 })
-				task.delay(0.12, function()
-					if flash.Parent then
-						flash.BackgroundTransparency = 0
-						flash.Size = UDim2.new(0, 0, 0, 2)
-					end
-				end)
 			end
 		end)
 
@@ -985,7 +937,7 @@ createBind = function(option, parent)
 		Parent = parent.content,
 	})
 
-	local label = create("TextLabel", {
+	create("TextLabel", {
 		BackgroundTransparency = 1,
 		Position = UDim2.new(0, 0, 0, 0),
 		Size = UDim2.new(1, -64, 1, 0),
@@ -1024,20 +976,20 @@ createBind = function(option, parent)
 	local function refreshDisplay()
 		local txt = formatBindKey(option.key)
 		bindText.Text = txt
-		local size = measureText(txt, 12, Enum.Font.GothamSemibold).X + 16
-		bindBg.Size = UDim2.new(0, math.max(40, size), 0, 20)
+		local width = measureText(txt, 12, Enum.Font.GothamSemibold).X + 16
+		bindBg.Size = UDim2.new(0, math.max(40, width), 0, 20)
 		library.flags[option.flag] = option.key
 	end
 
 	local function setBindVisual(active)
 		tween(bindBg, TWEEN_FAST, {
-			ImageColor3 = if active then library.accent else Color3.fromRGB(18, 18, 18),
+			ImageColor3 = active and library.accent or Color3.fromRGB(18, 18, 18),
 		})
 	end
 
-	option._maid:GiveTask(bindAccentCallback(function()
-		if binding then
-			bindBg.ImageColor3 = library.accent
+	option._maid:GiveTask(bindAccentCallback(function(accent)
+		if binding and bindBg.Parent then
+			bindBg.ImageColor3 = accent
 		end
 	end))
 
@@ -1114,7 +1066,7 @@ createSlider = function(option, parent)
 		Parent = parent.content,
 	})
 
-	local label = create("TextLabel", {
+	create("TextLabel", {
 		BackgroundTransparency = 1,
 		Position = UDim2.new(0, 0, 0, 0),
 		Size = UDim2.new(1, -48, 0, 16),
@@ -1184,9 +1136,8 @@ createSlider = function(option, parent)
 	local dragging = false
 
 	local function refreshVisuals(instant)
-		local value = option.value
-		local alpha = sliderAlpha(option.min, option.max, value)
-		local left, width, zero = sliderFill(option.min, option.max, value)
+		local alpha = sliderAlpha(option.min, option.max, option.value)
+		local left, width, zero = sliderFill(option.min, option.max, option.value)
 
 		if zero then
 			zeroLine.Visible = true
@@ -1284,7 +1235,7 @@ createList = function(option, parent)
 		Parent = main,
 	})
 
-	local label = create("TextLabel", {
+	create("TextLabel", {
 		BackgroundTransparency = 1,
 		Position = UDim2.new(0, 8, 0, 0),
 		Size = UDim2.new(1, -70, 1, 0),
@@ -1316,7 +1267,7 @@ createList = function(option, parent)
 		BackgroundTransparency = 1,
 		Image = ARROW_IMAGE,
 		ImageColor3 = Color3.fromRGB(70, 70, 70),
-		Rotation = if option.open then 90 else 180,
+		Rotation = option.open and 90 or 180,
 		Parent = button,
 	})
 
@@ -1329,7 +1280,7 @@ createList = function(option, parent)
 		Parent = main,
 	})
 
-	local dropdownBg = rounded("ImageLabel", {
+	rounded("ImageLabel", {
 		Size = UDim2.new(1, 0, 1, 0),
 		ImageColor3 = Color3.fromRGB(16, 16, 16),
 		Parent = dropdown,
@@ -1363,17 +1314,21 @@ createList = function(option, parent)
 	end
 
 	local function refreshHeight(instant)
-		local height = if option.open then getDropdownHeight() else 0
+		local height = option.open and getDropdownHeight() or 0
 		dropdown.Visible = option.open
 
+		local targetMain = UDim2.new(1, 0, 0, baseHeight + (option.open and (height + 4) or 0))
+		local targetDrop = UDim2.new(1, 0, 0, height)
+		local targetRot = option.open and 90 or 180
+
 		if instant then
-			dropdown.Size = UDim2.new(1, 0, 0, height)
-			main.Size = UDim2.new(1, 0, 0, baseHeight + height + (if option.open then 4 else 0))
-			arrow.Rotation = if option.open then 90 else 180
+			dropdown.Size = targetDrop
+			main.Size = targetMain
+			arrow.Rotation = targetRot
 		else
-			tween(dropdown, TWEEN_FAST, { Size = UDim2.new(1, 0, 0, height) })
-			tween(main, TWEEN_FAST, { Size = UDim2.new(1, 0, 0, baseHeight + height + (if option.open then 4 else 0)) })
-			tween(arrow, TWEEN_FAST, { Rotation = if option.open then 90 else 180 })
+			tween(dropdown, TWEEN_FAST, { Size = targetDrop })
+			tween(main, TWEEN_FAST, { Size = targetMain })
+			tween(arrow, TWEEN_FAST, { Rotation = targetRot })
 		end
 
 		refreshHolderChain(parent, true)
@@ -1387,26 +1342,32 @@ createList = function(option, parent)
 		end
 
 		for i, value in ipairs(option.values) do
+			local textValue = tostring(value)
+
 			local item = create("TextButton", {
 				LayoutOrder = i,
 				Size = UDim2.new(1, 0, 0, 22),
 				BackgroundTransparency = 1,
-				Text = tostring(value),
+				Text = textValue,
 				Font = Enum.Font.Gotham,
 				TextSize = 13,
-				TextColor3 = if tostring(value) == option.value then library.accent else Color3.fromRGB(235, 235, 235),
+				TextColor3 = textValue == option.value and library.accent or Color3.fromRGB(235, 235, 235),
 				AutoButtonColor = false,
 				Parent = itemsFrame,
 			})
 
 			option._maid:GiveTask(bindAccentCallback(function(accent)
 				if item.Parent then
-					item.TextColor3 = if tostring(value) == option.value then accent else Color3.fromRGB(235, 235, 235)
+					if textValue == option.value then
+						item.TextColor3 = accent
+					else
+						item.TextColor3 = Color3.fromRGB(235, 235, 235)
+					end
 				end
 			end))
 
 			option._maid:GiveTask(item.MouseButton1Click:Connect(function()
-				option:SetValue(tostring(value))
+				option:SetValue(textValue)
 				option:Close()
 			end))
 		end
@@ -1419,7 +1380,6 @@ createList = function(option, parent)
 
 		if not contains(option.values, value) then
 			table.insert(option.values, value)
-			rebuildItems()
 		end
 
 		self.value = value
@@ -1488,7 +1448,7 @@ createBox = function(option, parent)
 		Parent = parent.content,
 	})
 
-	local label = create("TextLabel", {
+	create("TextLabel", {
 		BackgroundTransparency = 1,
 		Position = UDim2.new(0, 0, 0, 0),
 		Size = UDim2.new(0.45, -4, 1, 0),
@@ -1513,7 +1473,6 @@ createBox = function(option, parent)
 		Size = UDim2.new(1, -12, 1, 0),
 		Text = option.value,
 		ClearTextOnFocus = false,
-		PlaceholderText = "",
 		Font = Enum.Font.GothamSemibold,
 		TextSize = 13,
 		TextColor3 = Color3.fromRGB(255, 255, 255),
@@ -1524,14 +1483,14 @@ createBox = function(option, parent)
 	option.main = main
 	library.flags[option.flag] = option.value
 
-	function option:SetValue(value, enter, silent)
+	function option:SetValue(value, enterPressed, silent)
 		value = tostring(value)
 		self.value = value
 		box.Text = value
 		library.flags[self.flag] = value
 
 		if not silent then
-			safeCall(self.text, self.callback, value, enter)
+			safeCall(self.text, self.callback, value, enterPressed)
 		end
 	end
 
@@ -1552,7 +1511,7 @@ createColor = function(option, parent)
 
 	local main = create("Frame", {
 		LayoutOrder = option.position,
-		Size = UDim2.new(1, 0, 0, baseHeight + (if option.open then pickerHeight + 4 else 0)),
+		Size = UDim2.new(1, 0, 0, baseHeight + (option.open and (pickerHeight + 4) or 0)),
 		BackgroundTransparency = 1,
 		Parent = parent.content,
 	})
@@ -1564,7 +1523,7 @@ createColor = function(option, parent)
 		Parent = main,
 	})
 
-	local label = create("TextLabel", {
+	create("TextLabel", {
 		BackgroundTransparency = 1,
 		Position = UDim2.new(0, 8, 0, 0),
 		Size = UDim2.new(1, -66, 1, 0),
@@ -1592,13 +1551,13 @@ createColor = function(option, parent)
 		BackgroundTransparency = 1,
 		Image = ARROW_IMAGE,
 		ImageColor3 = Color3.fromRGB(70, 70, 70),
-		Rotation = if option.open then 90 else 180,
+		Rotation = option.open and 90 or 180,
 		Parent = button,
 	})
 
 	local picker = rounded("ImageLabel", {
 		Position = UDim2.new(0, 0, 0, 32),
-		Size = UDim2.new(1, 0, 0, if option.open then pickerHeight else 0),
+		Size = UDim2.new(1, 0, 0, option.open and pickerHeight or 0),
 		ImageColor3 = Color3.fromRGB(16, 16, 16),
 		ClipsDescendants = true,
 		Visible = option.open,
@@ -1670,7 +1629,7 @@ createColor = function(option, parent)
 		Parent = hueBar,
 	})
 
-	local hexBoxBg = rounded("ImageLabel", {
+	local hexBg = rounded("ImageLabel", {
 		Position = UDim2.new(0, 8, 0, 146),
 		Size = UDim2.new(1, -16, 0, 22),
 		ImageColor3 = Color3.fromRGB(20, 20, 20),
@@ -1686,7 +1645,7 @@ createColor = function(option, parent)
 		TextSize = 12,
 		TextColor3 = Color3.fromRGB(220, 220, 220),
 		TextXAlignment = Enum.TextXAlignment.Left,
-		Parent = hexBoxBg,
+		Parent = hexBg,
 	})
 
 	option.main = main
@@ -1697,17 +1656,21 @@ createColor = function(option, parent)
 	local draggingHue = false
 
 	local function refreshHeight(instant)
-		local height = if option.open then pickerHeight else 0
+		local height = option.open and pickerHeight or 0
 		picker.Visible = option.open
 
+		local targetMain = UDim2.new(1, 0, 0, baseHeight + (option.open and (pickerHeight + 4) or 0))
+		local targetPicker = UDim2.new(1, 0, 0, height)
+		local targetRot = option.open and 90 or 180
+
 		if instant then
-			picker.Size = UDim2.new(1, 0, 0, height)
-			main.Size = UDim2.new(1, 0, 0, baseHeight + (if option.open then pickerHeight + 4 else 0))
-			arrow.Rotation = if option.open then 90 else 180
+			picker.Size = targetPicker
+			main.Size = targetMain
+			arrow.Rotation = targetRot
 		else
-			tween(picker, TWEEN_FAST, { Size = UDim2.new(1, 0, 0, height) })
-			tween(main, TWEEN_FAST, { Size = UDim2.new(1, 0, 0, baseHeight + (if option.open then pickerHeight + 4 else 0)) })
-			tween(arrow, TWEEN_FAST, { Rotation = if option.open then 90 else 180 })
+			tween(picker, TWEEN_FAST, { Size = targetPicker })
+			tween(main, TWEEN_FAST, { Size = targetMain })
+			tween(arrow, TWEEN_FAST, { Rotation = targetRot })
 		end
 
 		refreshHolderChain(parent, true)
@@ -1721,7 +1684,6 @@ createColor = function(option, parent)
 		satVal.ImageColor3 = Color3.fromHSV(hue, 1, 1)
 		satValCursor.Position = UDim2.fromScale(sat, 1 - val)
 		hueCursor.Position = UDim2.new(0.5, 0, hue, 0)
-
 		preview.ImageColor3 = color
 		hexLabel.Text = colorToHex(color)
 
@@ -1805,13 +1767,14 @@ createColor = function(option, parent)
 	end
 end
 
----------------------------------------------------------------------
--- Search
----------------------------------------------------------------------
-
 applySearchToHolder = function(holder, query, forceShow)
 	local loweredTitle = string.lower(holder.title or "")
-	local titleMatch = query ~= "" and string.find(loweredTitle, query, 1, true) ~= nil
+	local titleMatch = false
+
+	if query ~= "" and string.find(loweredTitle, query, 1, true) then
+		titleMatch = true
+	end
+
 	local forceAll = forceShow or titleMatch
 	local anyVisible = false
 
@@ -1889,10 +1852,6 @@ function library:SearchFor(query)
 	end
 end
 
----------------------------------------------------------------------
--- Window creation
----------------------------------------------------------------------
-
 function library:CreateWindow(title)
 	local window = createHolderRecord(title, #self.windows + 1, false)
 	table.insert(self.windows, window)
@@ -1903,6 +1862,7 @@ function library:CreateWindow(title)
 		if window.main and window._targetPosition then
 			window.main.Position = UDim2.new(0, -window.main.AbsoluteSize.X - 40, 0, window._targetPosition.Y.Offset)
 			window.main.ImageTransparency = 1
+
 			tween(window.main, TWEEN_ENTER, {
 				Position = window._targetPosition,
 				ImageTransparency = 0,
@@ -1913,10 +1873,6 @@ function library:CreateWindow(title)
 	return window
 end
 
----------------------------------------------------------------------
--- Accent
----------------------------------------------------------------------
-
 function library:SetAccent(color)
 	self.accent = color
 
@@ -1926,10 +1882,14 @@ function library:SetAccent(color)
 		if entry.dead then
 			table.remove(accentBindings, i)
 		elseif entry.type == "property" then
-			if entry.instance == nil or entry.instance.Parent == nil then
+			if not entry.instance or entry.instance.Parent == nil then
 				table.remove(accentBindings, i)
 			else
-				(entry.instance :: any)[entry.property] = if entry.transform then entry.transform(color) else color
+				if entry.transform then
+					entry.instance[entry.property] = entry.transform(color)
+				else
+					entry.instance[entry.property] = color
+				end
 			end
 		elseif entry.type == "callback" then
 			local ok = pcall(entry.callback, color)
@@ -1939,10 +1899,6 @@ function library:SetAccent(color)
 		end
 	end
 end
-
----------------------------------------------------------------------
--- Loader / search bar
----------------------------------------------------------------------
 
 local function playLoader(gui)
 	local loader = create("Frame", {
@@ -1961,7 +1917,7 @@ local function playLoader(gui)
 			Position = UDim2.new(0, ((i - 1) * 16) + 7, 0.5, 0),
 			Size = UDim2.new(0, 6, 0, 6),
 			BorderSizePixel = 0,
-			BackgroundColor3 = if i == 2 then library.accent else Color3.fromRGB(60, 60, 60),
+			BackgroundColor3 = (i == 2) and library.accent or Color3.fromRGB(60, 60, 60),
 			Parent = loader,
 		})
 		create("UICorner", {
@@ -1971,10 +1927,10 @@ local function playLoader(gui)
 		table.insert(dots, dot)
 	end
 
-	local cleanup = false
+	local running = true
 	task.spawn(function()
 		local start = os.clock()
-		while not cleanup and os.clock() - start < 0.85 do
+		while running and os.clock() - start < 0.85 do
 			for i, dot in ipairs(dots) do
 				if dot.Parent then
 					local phase = (os.clock() * 6) + i
@@ -1987,7 +1943,7 @@ local function playLoader(gui)
 	end)
 
 	task.delay(0.9, function()
-		cleanup = true
+		running = false
 		if loader.Parent then
 			loader:Destroy()
 		end
@@ -2001,14 +1957,13 @@ local function createSearchBar(gui)
 	end
 
 	searchBar = rounded("ImageLabel", {
-		Position = UDim2.new(0, 20, 0, 22),
+		Position = UDim2.new(0, 20, 0, -40),
 		Size = UDim2.new(0, 228, 0, 30),
 		ImageColor3 = Color3.fromRGB(14, 14, 14),
-		ImageTransparency = 0,
 		Parent = gui,
 	})
 
-	local icon = create("ImageLabel", {
+	create("ImageLabel", {
 		BackgroundTransparency = 1,
 		Position = UDim2.new(0, 8, 0.5, -7),
 		Size = UDim2.new(0, 14, 0, 14),
@@ -2017,7 +1972,7 @@ local function createSearchBar(gui)
 		Parent = searchBar,
 	})
 
-	local hotkey = create("TextLabel", {
+	create("TextLabel", {
 		AnchorPoint = Vector2.new(1, 0.5),
 		Position = UDim2.new(1, -8, 0.5, 0),
 		Size = UDim2.new(0, 38, 1, 0),
@@ -2056,13 +2011,20 @@ local function createSearchBar(gui)
 
 	maid:GiveTask(bindAccentProperty(accentLine, "BackgroundColor3"))
 	maid:GiveTask(searchBar)
+
+	tween(searchBar, TWEEN_ENTER, {
+		Position = UDim2.new(0, 20, 0, 22),
+	})
+
 	maid:GiveTask(searchInput:GetPropertyChangedSignal("Text"):Connect(function()
 		local text = searchInput.Text
+
 		if #text > 0 then
 			tween(accentLine, TWEEN_FAST, { Size = UDim2.new(1, -12, 0, 2) })
 		else
 			tween(accentLine, TWEEN_FAST, { Size = UDim2.new(0, 0, 0, 2) })
 		end
+
 		library:SearchFor(text)
 	end))
 
@@ -2071,66 +2033,11 @@ local function createSearchBar(gui)
 			return
 		end
 
-		if InputService:IsKeyDown(Enum.KeyCode.LeftControl) or InputService:IsKeyDown(Enum.KeyCode.RightControl) then
-			if input.KeyCode == Enum.KeyCode.F then
-				searchInput:CaptureFocus()
-			end
+		local ctrlDown = InputService:IsKeyDown(Enum.KeyCode.LeftControl) or InputService:IsKeyDown(Enum.KeyCode.RightControl)
+		if ctrlDown and input.KeyCode == Enum.KeyCode.F and searchInput then
+			searchInput:CaptureFocus()
 		end
 	end))
-end
-
----------------------------------------------------------------------
--- Init / Close
----------------------------------------------------------------------
-
-function library:Init()
-	if self.base then
-		return self.base
-	end
-
-	self._rootMaid = newMaid()
-
-	local gui = create("ScreenGui", {
-		Name = "uwuware reborn v2",
-		ResetOnSpawn = false,
-		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
-		DisplayOrder = 999999,
-		IgnoreGuiInset = true,
-	})
-
-	local ok, protectErr = pcall(function()
-		local synEnv = (syn :: any)
-		if synEnv and synEnv.protect_gui then
-			synEnv.protect_gui(gui)
-		end
-	end)
-	if not ok then
-		-- ignored
-	end
-
-	gui.Parent = getGuiParent()
-	self.base = gui
-	self._rootMaid:GiveTask(gui)
-
-	createSearchBar(gui)
-	playLoader(gui)
-
-	for _, window in ipairs(self.windows) do
-		window:_Mount(gui)
-
-		if window.main and window._targetPosition then
-			window.main.Position = UDim2.new(0, -window.main.AbsoluteSize.X - 40, 0, window._targetPosition.Y.Offset)
-			window.main.ImageTransparency = 1
-
-			tween(window.main, TWEEN_ENTER, {
-				Position = window._targetPosition,
-				ImageTransparency = 0,
-			})
-		end
-	end
-
-	self.open = true
-	return gui
 end
 
 destroyHolderRecursive = function(holder)
@@ -2157,6 +2064,52 @@ destroyHolderRecursive = function(holder)
 	holder._titleLabel = nil
 end
 
+function library:Init()
+	if self.base then
+		return self.base
+	end
+
+	self._rootMaid = newMaid()
+
+	local gui = create("ScreenGui", {
+		Name = "uwuware reborn v2",
+		ResetOnSpawn = false,
+		ZIndexBehavior = Enum.ZIndexBehavior.Sibling,
+		DisplayOrder = 999999,
+		IgnoreGuiInset = true,
+	})
+
+	pcall(function()
+		if syn and syn.protect_gui then
+			syn.protect_gui(gui)
+		end
+	end)
+
+	gui.Parent = getGuiParent()
+	self.base = gui
+	self._rootMaid:GiveTask(gui)
+
+	createSearchBar(gui)
+	playLoader(gui)
+
+	for _, window in ipairs(self.windows) do
+		window:_Mount(gui)
+
+		if window.main and window._targetPosition then
+			window.main.Position = UDim2.new(0, -window.main.AbsoluteSize.X - 40, 0, window._targetPosition.Y.Offset)
+			window.main.ImageTransparency = 1
+
+			tween(window.main, TWEEN_ENTER, {
+				Position = window._targetPosition,
+				ImageTransparency = 0,
+			})
+		end
+	end
+
+	self.open = true
+	return gui
+end
+
 function library:Close()
 	if not self.base then
 		return
@@ -2167,7 +2120,7 @@ function library:Close()
 
 	if searchBar then
 		tween(searchBar, TWEEN_EXIT, {
-			Position = UDim2.new(0, 20, 0, -36),
+			Position = UDim2.new(0, 20, 0, -40),
 			ImageTransparency = 1,
 		})
 	end
@@ -2203,9 +2156,5 @@ function library:Close()
 		windowOriginals = {}
 	end)
 end
-
----------------------------------------------------------------------
--- Return
----------------------------------------------------------------------
 
 return library
